@@ -1,0 +1,27 @@
+[package]
+name = "einkaufslisten_bot"
+version = "0.1.0"
+authors = ["simon <simon@simonscode.org>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+teloxide = "0.3"
+teloxide-macros = "0.3"
+
+log = "0.4.8"
+pretty_env_logger = "0.4.0"
+
+confy = "0.4.0"
+lazy_static = "1.4.0"
+anyhow = "1.0.33"
+serde_derive = "1.0.117"
+
+[dependencies.serde]
+version = "1.0.117"
+features = ["derive"]
+
+[dependencies.tokio]
+version =  "0.2.11"
+features = ["rt-threaded", "macros"]
