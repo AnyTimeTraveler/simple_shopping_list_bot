@@ -13,10 +13,9 @@ teloxide-macros = "0.3"
 log = "0.4.8"
 pretty_env_logger = "0.4.0"
 
-confy = "0.4.0"
 lazy_static = "1.4.0"
 anyhow = "1.0.33"
-serde_derive = "1.0.117"
+serde_json = "1.0.59"
 
 [dependencies.serde]
 version = "1.0.117"

@@ -2,19 +2,22 @@ use lazy_static::lazy_static;
 use teloxide::prelude::*;
 use tokio::sync::Mutex;
 use teloxide::types::{MessageKind, MediaKind, ChatId, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery};
-use std::collections::HashMap;
 use teloxide::types::ChatOrInlineMessage::Chat;
 use teloxide::types::InlineKeyboardButtonKind::CallbackData;
-use confy::ConfyError;
+use tokio::fs::{File, OpenOptions};
+use tokio::io;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serde::{Deserialize, Serialize};
+use teloxide::{ApiErrorKind, KnownApiErrorKind};
 
-#[macro_use]
-extern crate serde_derive;
+
+extern crate serde_json;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Data {
     items: Vec<(String, bool)>,
-    recipes: HashMap<String, Vec<String>>,
-    active_message: Option<Message>,
+    recipes: Vec<(String, Vec<String>)>,
+    active_message: Option<(i64, i32)>,
     current_recipe: Option<(Option<String>, Vec<String>)>,
 }
 
@@ -22,7 +25,7 @@ impl Default for Data {
     fn default() -> Self {
         Self {
             items: Vec::new(),
-            recipes: HashMap::new(),
+            recipes: Vec::new(),
             active_message: None,
             current_recipe: None,
         }
@@ -31,7 +34,16 @@ impl Default for Data {
 
 impl Data {
     fn get_shopping_list_message_text(&self) -> String {
-        self.items.iter().fold(String::new(), |a, (b, _)| { format!("{}\n - {}", a, b) })
+        format!(
+            "Einkaufsliste:\n{}",
+            self.items.iter()
+                .fold(
+                    String::new(),
+                    |a, (b, _)| {
+                        format!("{}\n - {}", a, b)
+                    },
+                )
+        )
     }
 
     fn get_recipe_text(&self) -> String {
@@ -76,24 +88,33 @@ impl Data {
     }
 
     async fn replace_active_message<T: GetChatId>(&mut self, ctx: &UpdateWithCx<T>, text: String, markup: Option<InlineKeyboardMarkup>) -> anyhow::Result<()> {
-        if let Some(active_message) = &self.active_message {
+        if let Some((chat_id, message_id)) = &self.active_message {
             let mut message = ctx.bot.edit_message_text(
                 Chat {
-                    chat_id: ChatId::Id(active_message.chat.id),
-                    message_id: active_message.id,
+                    chat_id: ChatId::Id(*chat_id),
+                    message_id: *message_id,
                 }, text.clone());
             if let Some(markup) = markup.clone() {
                 message = message.reply_markup(markup);
             }
-            if let Ok(_) = message.send().await {
-                return Ok(());
+            match message.send().await {
+                Ok(message) => {
+                    self.active_message = Some((message.chat.id, message.id));
+                    return Ok(());
+                }
+                Err(RequestError::ApiError { kind: ApiErrorKind::Known(KnownApiErrorKind::MessageNotModified), .. }) => {
+                    log::warn!("Message has the same content!");
+                    return Ok(());
+                }
+                Err(_) => log::error!("Couldn't replace message!")
             }
         }
         let mut message = ctx.bot.send_message(ctx.update.get_chat_id(), text);
         if let Some(markup) = markup {
             message = message.reply_markup(markup);
         }
-        self.active_message = Some(message.send().await?);
+        let message = message.send().await?;
+        self.active_message = Some((message.chat.id, message.id));
 
         Ok(())
     }
@@ -103,18 +124,26 @@ lazy_static! {
     static ref CONFIG: Mutex<Data> = Mutex::new(Data::default());
 }
 
-const CONFIG_NAME: &'static str = "shopping_list_bot";
+const CONFIG_PATH: &'static str = "./shopping_list_bot.json";
 
 #[tokio::main]
 async fn main() {
     {
         let mut data = CONFIG.lock().await;
-        let read_data: Result<Data, ConfyError> = confy::load(CONFIG_NAME);
-        if let Ok(read_data) = read_data {
+        let read_data: io::Result<File> = OpenOptions::new()
+            .read(true)
+            .create(false)
+            .open(CONFIG_PATH).await;
+        if let Ok(mut read_data) = read_data {
+            let mut string = String::new();
+            read_data.read_to_string(&mut string).await.unwrap();
+            let read_data: Data = serde_json::from_str(string.as_str()).unwrap();
             data.active_message = read_data.active_message;
             data.items = read_data.items;
             data.current_recipe = read_data.current_recipe;
             data.recipes = read_data.recipes;
+        } else {
+            log::warn!("Data file missing or damaged");
         }
     }
     run().await;
@@ -130,23 +159,39 @@ async fn run() {
         .callback_queries_handler(|rx: DispatcherHandlerRx<CallbackQuery>| {
             rx.for_each(|ctx| async move {
                 handle_callback_query(ctx).await.expect("Error handling callback query");
-                {
-                    let data: Data = CONFIG.lock().await.clone();
-                    let _ = confy::store(CONFIG_NAME, data);
-                }
+                store_data().await
             })
         })
         .messages_handler(|rx: DispatcherHandlerRx<Message>| {
             rx.for_each(|ctx| async move {
                 handle_message(ctx).await.expect("Error handling message");
-                {
-                    let data: Data = CONFIG.lock().await.clone();
-                    let _ = confy::store(CONFIG_NAME, data);
-                }
+                store_data().await
             })
         })
         .dispatch()
         .await;
+}
+
+async fn store_data() {
+    let data: Data = CONFIG.lock().await.clone();
+    let data_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(CONFIG_PATH).await;
+    match data_file {
+        Ok(mut file) => {
+            match serde_json::to_string_pretty(&data) {
+                Ok(string) => {
+                    if let Err(error) = file.write_all(string.as_bytes()).await {
+                        log::error!("{:?}", error);
+                    }
+                }
+                Err(error) => log::error!("{:?}", error)
+            }
+        }
+        Err(error) => log::error!("{:?}", error)
+    }
 }
 
 async fn handle_message(ctx: UpdateWithCx<Message>) -> anyhow::Result<()> {
@@ -173,13 +218,20 @@ async fn handle_message(ctx: UpdateWithCx<Message>) -> anyhow::Result<()> {
                     if text.text.starts_with("#") {
                         return Ok(());
                     }
-                    if let Some(ingredients) = guard.recipes.get(text.text.as_str()).cloned() {
-                        for item in ingredients.iter().map(|name| { (name.clone(), false) }) {
-                            guard.items.push(item);
-                        }
-                    } else {
+
+                    let items: Vec<String> = guard.recipes.iter()
+                        .filter(|(name, _)| { name == text.text.as_str() })
+                        .flat_map(|(_, ingredients)| { ingredients })
+                        .cloned()
+                        .collect();
+                    if items.is_empty() {
                         guard.items.push((text.text, false));
+                    } else {
+                        for item in items {
+                            guard.items.push((item, false));
+                        }
                     }
+
                     guard.update_shopping_list(&ctx).await?;
                 }
             }
@@ -212,7 +264,7 @@ async fn handle_callback_query(ctx: UpdateWithCx<CallbackQuery>) -> anyhow::Resu
             Some("recipe_done") => {
                 if let Some(recipe) = guard.current_recipe.clone() {
                     if let Some(name) = recipe.0 {
-                        guard.recipes.insert(name, recipe.1);
+                        guard.recipes.push((name, recipe.1));
                     }
                 }
                 guard.replace_active_message(&ctx, "👍".to_string(), None).await?;
@@ -236,8 +288,9 @@ async fn handle_callback_query(ctx: UpdateWithCx<CallbackQuery>) -> anyhow::Resu
                     println!("Removing: {}", i);
                     guard.items.remove(i);
                 }
-                let markup = Some(guard.get_list_markup());
-                guard.replace_active_message(&ctx, "Einkaufsliste:".to_string(), markup).await?;
+                let markup = Some(guard.get_action_buttons_markup());
+                let text = guard.get_shopping_list_message_text();
+                guard.replace_active_message(&ctx, text, markup).await?;
             }
             _ => println!("Unknown callback query data: {}", data)
         }
