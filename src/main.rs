@@ -73,16 +73,35 @@ impl Data {
         )
     }
 
-    fn get_action_buttons_markup(&self) -> InlineKeyboardMarkup {
-        InlineKeyboardMarkup::default().append_row(
+    fn get_recipe_buttons(&self) -> InlineKeyboardMarkup {
+        let mut markup = InlineKeyboardMarkup::default();
+
+        for (name, _) in self.recipes.iter() {
+            markup = markup.append_row(vec![InlineKeyboardButton::new(name, CallbackData(format!("add {}", name)))]);
+        }
+
+        markup.append_row(
             vec![
-                InlineKeyboardButton::new("🛒", CallbackData("start_remove".to_string())),
-                InlineKeyboardButton::new("📝", CallbackData("start_recipe".to_string()))
+                InlineKeyboardButton::new("💚", CallbackData("return_to_main_list".to_string()))
             ]
         )
     }
 
-    async fn update_shopping_list(&mut self, ctx: &UpdateWithCx<Message>) -> anyhow::Result<()> {
+    fn get_action_buttons_markup(&self) -> InlineKeyboardMarkup {
+        InlineKeyboardMarkup::default().append_row(
+            vec![
+                InlineKeyboardButton::new("🛒", CallbackData("start_remove".to_string())),
+                InlineKeyboardButton::new("📝🛒", CallbackData("list_recipes".to_string()))
+            ]
+        )
+            .append_row(
+                vec![
+                    InlineKeyboardButton::new("📝➕", CallbackData("start_recipe".to_string()))
+                ]
+            )
+    }
+
+    async fn update_shopping_list<T: GetChatId>(&mut self, ctx: &UpdateWithCx<T>) -> anyhow::Result<()> {
         self.replace_active_message(ctx, self.get_shopping_list_message_text(), Some(self.get_action_buttons_markup())).await?;
         Ok(())
     }
@@ -117,6 +136,23 @@ impl Data {
         self.active_message = Some((message.chat.id, message.id));
 
         Ok(())
+    }
+
+    async fn handle_new_item<T: GetChatId>(&mut self, ctx: &UpdateWithCx<T>, text: String) -> anyhow::Result<()> {
+        let items: Vec<String> = self.recipes.iter()
+            .filter(|(name, _)| { name == text.as_str() })
+            .flat_map(|(_, ingredients)| { ingredients })
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            self.items.push((text, false));
+        } else {
+            for item in items {
+                self.items.push((item, false));
+            }
+        }
+
+        self.update_shopping_list(&ctx).await
     }
 }
 
@@ -218,21 +254,7 @@ async fn handle_message(ctx: UpdateWithCx<Message>) -> anyhow::Result<()> {
                     if text.text.starts_with("#") {
                         return Ok(());
                     }
-
-                    let items: Vec<String> = guard.recipes.iter()
-                        .filter(|(name, _)| { name == text.text.as_str() })
-                        .flat_map(|(_, ingredients)| { ingredients })
-                        .cloned()
-                        .collect();
-                    if items.is_empty() {
-                        guard.items.push((text.text, false));
-                    } else {
-                        for item in items {
-                            guard.items.push((item, false));
-                        }
-                    }
-
-                    guard.update_shopping_list(&ctx).await?;
+                    guard.handle_new_item(&ctx, text.text).await?;
                 }
             }
             ctx.delete_message().send().await?;
@@ -267,7 +289,8 @@ async fn handle_callback_query(ctx: UpdateWithCx<CallbackQuery>) -> anyhow::Resu
                         guard.recipes.push((name, recipe.1));
                     }
                 }
-                guard.replace_active_message(&ctx, "👍".to_string(), None).await?;
+                let markup = Some(guard.get_action_buttons_markup());
+                guard.replace_active_message(&ctx, "👍".to_string(), markup).await?;
 
                 guard.current_recipe = None;
             }
@@ -291,6 +314,17 @@ async fn handle_callback_query(ctx: UpdateWithCx<CallbackQuery>) -> anyhow::Resu
                 let markup = Some(guard.get_action_buttons_markup());
                 let text = guard.get_shopping_list_message_text();
                 guard.replace_active_message(&ctx, text, markup).await?;
+            }
+            Some("list_recipes") => {
+                let markup = Some(guard.get_recipe_buttons());
+                guard.replace_active_message(&ctx, "Click the recipe to add:".to_string(), markup).await?;
+            }
+            Some("add") => {
+                let name = split.fold(String::new(), |a, b| format!("{} {}", a, b));
+                guard.handle_new_item(&ctx, name).await?;
+            }
+            Some("return_to_main_list") => {
+                guard.update_shopping_list(&ctx).await?;
             }
             _ => println!("Unknown callback query data: {}", data)
         }
