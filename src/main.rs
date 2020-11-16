@@ -140,7 +140,7 @@ impl Data {
 
     async fn handle_new_item<T: GetChatId>(&mut self, ctx: &UpdateWithCx<T>, text: String) -> anyhow::Result<()> {
         let items: Vec<String> = self.recipes.iter()
-            .filter(|(name, _)| { name == text.as_str() })
+            .filter(|(name, _)| { name.as_str() == text.as_str() })
             .flat_map(|(_, ingredients)| { ingredients })
             .cloned()
             .collect();
