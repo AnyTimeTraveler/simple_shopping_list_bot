@@ -1,22 +1,24 @@
+extern crate serde_json;
+
+use std::collections::HashMap;
+
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
+use teloxide::{ApiErrorKind, KnownApiErrorKind};
 use teloxide::prelude::*;
-use tokio::sync::Mutex;
-use teloxide::types::{MessageKind, MediaKind, ChatId, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery};
+use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MessageKind};
 use teloxide::types::ChatOrInlineMessage::Chat;
 use teloxide::types::InlineKeyboardButtonKind::CallbackData;
 use tokio::fs::{File, OpenOptions};
 use tokio::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use serde::{Deserialize, Serialize};
-use teloxide::{ApiErrorKind, KnownApiErrorKind};
+use tokio::sync::Mutex;
 
-
-extern crate serde_json;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Data {
     items: Vec<(String, bool)>,
-    recipes: Vec<(String, Vec<String>)>,
+    recipes: HashMap<String, Vec<String>>,
     active_message: Option<(i64, i32)>,
     current_recipe: Option<(Option<String>, Vec<String>)>,
 }
@@ -25,7 +27,7 @@ impl Default for Data {
     fn default() -> Self {
         Self {
             items: Vec::new(),
-            recipes: Vec::new(),
+            recipes: HashMap::new(),
             active_message: None,
             current_recipe: None,
         }
@@ -139,17 +141,12 @@ impl Data {
     }
 
     async fn handle_new_item<T: GetChatId>(&mut self, ctx: &UpdateWithCx<T>, text: String) -> anyhow::Result<()> {
-        let items: Vec<String> = self.recipes.iter()
-            .filter(|(name, _)| { name.as_str() == text.as_str() })
-            .flat_map(|(_, ingredients)| { ingredients })
-            .cloned()
-            .collect();
-        if items.is_empty() {
-            self.items.push((text, false));
-        } else {
-            for item in items {
-                self.items.push((item, false));
+        if let Some(recipe) = self.recipes.get(&text) {
+            for ingredient in recipe {
+                self.items.push((ingredient.to_string(), false));
             }
+        } else {
+            self.items.push((text, false));
         }
 
         self.update_shopping_list(&ctx).await
@@ -286,7 +283,7 @@ async fn handle_callback_query(ctx: UpdateWithCx<CallbackQuery>) -> anyhow::Resu
             Some("recipe_done") => {
                 if let Some(recipe) = guard.current_recipe.clone() {
                     if let Some(name) = recipe.0 {
-                        guard.recipes.push((name, recipe.1));
+                        guard.recipes.insert(name, recipe.1);
                     }
                 }
                 let markup = Some(guard.get_action_buttons_markup());
@@ -320,7 +317,7 @@ async fn handle_callback_query(ctx: UpdateWithCx<CallbackQuery>) -> anyhow::Resu
                 guard.replace_active_message(&ctx, "Click the recipe to add:".to_string(), markup).await?;
             }
             Some("add") => {
-                let name = split.fold(String::new(), |a, b| format!("{} {}", a, b));
+                let name = split.fold(String::new(), |a, b| format!("{} {}", a, b)).trim().to_string();
                 guard.handle_new_item(&ctx, name).await?;
             }
             Some("return_to_main_list") => {
