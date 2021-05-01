@@ -4,16 +4,14 @@ use std::collections::HashMap;
 
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use teloxide::{ApiErrorKind, KnownApiErrorKind};
+use teloxide::{ApiError, RequestError};
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MessageKind};
-use teloxide::types::ChatOrInlineMessage::Chat;
+use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MessageKind};
 use teloxide::types::InlineKeyboardButtonKind::CallbackData;
 use tokio::fs::{File, OpenOptions};
-use tokio::io;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
-
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Data {
@@ -103,18 +101,14 @@ impl Data {
             )
     }
 
-    async fn update_shopping_list<T: GetChatId>(&mut self, ctx: &UpdateWithCx<T>) -> anyhow::Result<()> {
+    async fn update_shopping_list<T: GetChatId>(&mut self, ctx: &UpdateWithCx<Bot, T>) -> anyhow::Result<()> {
         self.replace_active_message(ctx, self.get_shopping_list_message_text(), Some(self.get_action_buttons_markup())).await?;
         Ok(())
     }
 
-    async fn replace_active_message<T: GetChatId>(&mut self, ctx: &UpdateWithCx<T>, text: String, markup: Option<InlineKeyboardMarkup>) -> anyhow::Result<()> {
+    async fn replace_active_message<T: GetChatId>(&mut self, ctx: &UpdateWithCx<Bot, T>, text: String, markup: Option<InlineKeyboardMarkup>) -> anyhow::Result<()> {
         if let Some((chat_id, message_id)) = &self.active_message {
-            let mut message = ctx.bot.edit_message_text(
-                Chat {
-                    chat_id: ChatId::Id(*chat_id),
-                    message_id: *message_id,
-                }, text.clone());
+            let mut message = ctx.requester.edit_message_text(ChatId::Id(*chat_id), *message_id, text.clone());
             if let Some(markup) = markup.clone() {
                 message = message.reply_markup(markup);
             }
@@ -123,14 +117,14 @@ impl Data {
                     self.active_message = Some((message.chat.id, message.id));
                     return Ok(());
                 }
-                Err(RequestError::ApiError { kind: ApiErrorKind::Known(KnownApiErrorKind::MessageNotModified), .. }) => {
+                Err(RequestError::ApiError { kind: ApiError::MessageNotModified, .. }) => {
                     log::warn!("Message has the same content!");
                     return Ok(());
                 }
                 Err(_) => log::error!("Couldn't replace message!")
             }
         }
-        let mut message = ctx.bot.send_message(ctx.update.get_chat_id(), text);
+        let mut message = ctx.requester.send_message(ctx.update.get_chat_id(), text);
         if let Some(markup) = markup {
             message = message.reply_markup(markup);
         }
@@ -140,7 +134,7 @@ impl Data {
         Ok(())
     }
 
-    async fn handle_new_item<T: GetChatId>(&mut self, ctx: &UpdateWithCx<T>, text: String) -> anyhow::Result<()> {
+    async fn handle_new_item<T: GetChatId>(&mut self, ctx: &UpdateWithCx<Bot, T>, text: String) -> anyhow::Result<()> {
         if let Some(recipe) = self.recipes.get(&text) {
             for ingredient in recipe {
                 self.items.push((ingredient.to_string(), false));
@@ -189,17 +183,19 @@ async fn run() {
     let bot = Bot::from_env();
 
     Dispatcher::new(bot)
-        .callback_queries_handler(|rx: DispatcherHandlerRx<CallbackQuery>| {
-            rx.for_each(|ctx| async move {
-                handle_callback_query(ctx).await.expect("Error handling callback query");
-                store_data().await
-            })
+        .callback_queries_handler(|rx: DispatcherHandlerRx<Bot, CallbackQuery>| {
+            UnboundedReceiverStream::new(rx)
+                .for_each(|ctx| async move {
+                    handle_callback_query(ctx).await.expect("Error handling callback query");
+                    store_data().await
+                })
         })
-        .messages_handler(|rx: DispatcherHandlerRx<Message>| {
-            rx.for_each(|ctx| async move {
-                handle_message(ctx).await.expect("Error handling message");
-                store_data().await
-            })
+        .messages_handler(|rx: DispatcherHandlerRx<Bot, Message>| {
+            UnboundedReceiverStream::new(rx)
+                .for_each(|ctx| async move {
+                    handle_message(ctx).await.expect("Error handling message");
+                    store_data().await
+                })
         })
         .dispatch()
         .await;
@@ -227,7 +223,7 @@ async fn store_data() {
     }
 }
 
-async fn handle_message(ctx: UpdateWithCx<Message>) -> anyhow::Result<()> {
+async fn handle_message(ctx: UpdateWithCx<Bot, Message>) -> anyhow::Result<()> {
     let mut guard = CONFIG.lock().await;
 
     if let MessageKind::Common(message) = ctx.update.kind.clone() {
@@ -261,7 +257,7 @@ async fn handle_message(ctx: UpdateWithCx<Message>) -> anyhow::Result<()> {
 }
 
 
-async fn handle_callback_query(ctx: UpdateWithCx<CallbackQuery>) -> anyhow::Result<()> {
+async fn handle_callback_query(ctx: UpdateWithCx<Bot, CallbackQuery>) -> anyhow::Result<()> {
     let mut guard = CONFIG.lock().await;
     let user = ctx.update.from.clone();
     log::info!("{} ({}): {:?}", user.first_name, user.id, ctx.update.data);
@@ -338,17 +334,17 @@ fn get_recipe_markup() -> InlineKeyboardMarkup {
 }
 
 trait GetChatId {
-    fn get_chat_id(&self) -> i64;
+    fn get_chat_id(&self) -> ChatId;
 }
 
 impl GetChatId for CallbackQuery {
-    fn get_chat_id(&self) -> i64 {
-        self.message.as_ref().unwrap().chat_id()
+    fn get_chat_id(&self) -> ChatId {
+        ChatId::Id(self.message.as_ref().unwrap().chat_id())
     }
 }
 
 impl GetChatId for Message {
-    fn get_chat_id(&self) -> i64 {
-        self.chat_id()
+    fn get_chat_id(&self) -> ChatId {
+        ChatId::Id(self.chat_id())
     }
 }

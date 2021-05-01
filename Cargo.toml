@@ -1,26 +1,39 @@
 [package]
 name = "einkaufslisten_bot"
 version = "0.1.0"
-authors = ["simon <simon@simonscode.org>"]
+authors = ["Simon Struck <simon@simonscode.org>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
-teloxide = "0.3"
-teloxide-macros = "0.3"
+[dependencies.teloxide]
+version = "~0.4"
 
-log = "0.4.8"
-pretty_env_logger = "0.4.0"
+[dependencies.teloxide-macros]
+version = "~0.4"
 
-lazy_static = "1.4.0"
-anyhow = "1.0.33"
-serde_json = "1.0.59"
+[dependencies.log]
+version = "~0.4"
+
+[dependencies.pretty_env_logger]
+version = "~0.4"
+
+[dependencies.lazy_static]
+version = "~1.4"
+
+[dependencies.anyhow]
+version = "~1.0"
+
+[dependencies.serde_json]
+version = "~1.0"
 
 [dependencies.serde]
-version = "1.0.117"
+version = "~1.0"
 features = ["derive"]
 
 [dependencies.tokio]
-version =  "0.2.11"
-features = ["rt-threaded", "macros"]
+version = "~1.5"
+features = ["macros", "rt-multi-thread", "fs", "io-std", "io-util", "sync"]
+
+[dependencies.tokio-stream]
+version = "~0.1"
