@@ -3,6 +3,6 @@
 *.iml
 *.ipr
 *.iws
-/start.sh
-*.json
-
+*.json*
+start.sh
+/shopping_bot
