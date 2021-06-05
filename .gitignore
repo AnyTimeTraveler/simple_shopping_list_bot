@@ -4,3 +4,5 @@
 *.ipr
 *.iws
 shopping_list_bot.json
+start.sh
+/shopping_bot
